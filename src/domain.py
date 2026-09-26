@@ -13,7 +13,7 @@ class ConflictError(DomainError): kind=ErrorKind.CONFLICT
 SEVERITIES=['minor', 'moderate', 'serious', 'fatal']; STATES=['reported', 'investigating', 'corrective_action', 'verification', 'closed']; ROLES=['reporter', 'investigator', 'safety_manager', 'viewer']
 @dataclass(frozen=True)
 class Item:
-    id:int; title:str; description:str; severity:str; quantity:float; threshold:float; status:str; version:int; external_ref:Optional[str]; created_by:str; created_at:str; updated_at:str
+    id:int; title:str; description:str; severity:str; quantity:float; threshold:float; status:str; version:int; external_ref:Optional[str]; workstation:Optional[str]; injury_cause:Optional[str]; created_by:str; created_at:str; updated_at:str
 @dataclass(frozen=True)
 class Record:
     id:int; item_id:int; kind:str; detail:str; status:str; external_ref:Optional[str]; created_by:str; created_at:str

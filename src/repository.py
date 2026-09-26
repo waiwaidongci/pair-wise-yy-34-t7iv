@@ -36,12 +36,16 @@ class Repository:
                     status TEXT NOT NULL CHECK(status IN ({statuses})),
                     version INTEGER NOT NULL DEFAULT 1,
                     external_ref TEXT,
+                    workstation TEXT,
+                    injury_cause TEXT,
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_items_external_ref
                     ON items(external_ref) WHERE external_ref IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS ix_items_recurrence
+                    ON items(workstation, injury_cause, status);
                 CREATE TABLE IF NOT EXISTS records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
@@ -66,6 +70,13 @@ class Repository:
                     created_at TEXT NOT NULL
                 );
             """)
+        columns = {row["name"] for row in
+                   self.conn.execute("PRAGMA table_info(items)")}
+        with self.conn:
+            if "workstation" not in columns:
+                self.conn.execute("ALTER TABLE items ADD COLUMN workstation TEXT")
+            if "injury_cause" not in columns:
+                self.conn.execute("ALTER TABLE items ADD COLUMN injury_cause TEXT")
 
     @staticmethod
     def _item(row: sqlite3.Row) -> Dict[str, Any]:
@@ -73,16 +84,18 @@ class Repository:
 
     def create_item(self, title: str, description: str, severity: str,
                     quantity: float, threshold: float, external_ref: Optional[str],
-                    actor: str) -> Dict[str, Any]:
+                    workstation: Optional[str], injury_cause: Optional[str],
+                    status: str, actor: str) -> Dict[str, Any]:
         now = utc_now()
         try:
             with self._lock, self.conn:
                 cur = self.conn.execute(
                     """INSERT INTO items(title, description, severity, quantity, threshold,
-                       status, version, external_ref, created_by, created_at, updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                    (title, description, severity, quantity, threshold, STATES[0], 1,
-                     external_ref, actor, now, now),
+                       status, version, external_ref, workstation, injury_cause,
+                       created_by, created_at, updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (title, description, severity, quantity, threshold, status, 1,
+                     external_ref, workstation, injury_cause, actor, now, now),
                 )
                 item_id = int(cur.lastrowid)
         except sqlite3.IntegrityError as exc:
@@ -122,6 +135,32 @@ class Repository:
                     raise NotFoundError("项目不存在")
                 raise ConflictError("版本冲突，请刷新后重试")
         return self.get_item(item_id)
+
+    def update_link(self, item_id: int, workstation: Optional[str],
+                    injury_cause: Optional[str], status: str,
+                    actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE items SET workstation=?, injury_cause=?, status=?,
+                   version=version+1, updated_at=? WHERE id=?""",
+                (workstation, injury_cause, status, now, item_id),
+            )
+            if cur.rowcount == 0:
+                raise NotFoundError("项目不存在")
+        return self.get_item(item_id)
+
+    def find_closed_matches(self, workstation: str, injury_cause: str,
+                            exclude_id: int, since: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT * FROM items
+                   WHERE status='closed' AND workstation=? AND injury_cause=?
+                     AND id<>? AND updated_at>=?
+                   ORDER BY updated_at DESC, id DESC""",
+                (workstation, injury_cause, exclude_id, since),
+            ).fetchall()
+        return [self._item(row) for row in rows]
 
     def add_record(self, item_id: int, kind: str, detail: str, status: str,
                    external_ref: Optional[str], actor: str) -> Dict[str, Any]:
