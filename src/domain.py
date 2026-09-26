@@ -25,6 +25,11 @@ def require_text(value,field,max_length=2000):
     value=value.strip()
     if len(value)>max_length: raise ValidationError(f"{field}不能超过{max_length}个字符")
     return value
+def optional_text(value,field,max_length=2000):
+    if value is None: return None
+    if not isinstance(value,str): raise ValidationError(f"{field}必须是字符串")
+    if not value.strip(): return None
+    return require_text(value,field,max_length)
 def normalize_severity(value):
     if value not in SEVERITIES: raise ValidationError("severity不在允许范围内")
     return value

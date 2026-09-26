@@ -33,8 +33,16 @@ class Repository:
                     severity TEXT NOT NULL,
                     quantity REAL NOT NULL DEFAULT 0,
                     threshold REAL NOT NULL DEFAULT 1,
+                    workstation TEXT,
+                    injury_cause TEXT,
                     status TEXT NOT NULL CHECK(status IN ({statuses})),
                     version INTEGER NOT NULL DEFAULT 1,
+                    recurrence_count INTEGER NOT NULL DEFAULT 0,
+                    recurrence_of INTEGER,
+                    recurrence_links TEXT NOT NULL DEFAULT '[]',
+                    last_corrective_summary TEXT,
+                    recurrence_evaluated_at TEXT,
+                    closed_at TEXT,
                     external_ref TEXT,
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -66,6 +74,24 @@ class Repository:
                     created_at TEXT NOT NULL
                 );
             """)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
+        additions = {
+            "workstation": "ALTER TABLE items ADD COLUMN workstation TEXT",
+            "injury_cause": "ALTER TABLE items ADD COLUMN injury_cause TEXT",
+            "recurrence_count": "ALTER TABLE items ADD COLUMN recurrence_count INTEGER NOT NULL DEFAULT 0",
+            "recurrence_of": "ALTER TABLE items ADD COLUMN recurrence_of INTEGER",
+            "recurrence_links": "ALTER TABLE items ADD COLUMN recurrence_links TEXT NOT NULL DEFAULT '[]'",
+            "last_corrective_summary": "ALTER TABLE items ADD COLUMN last_corrective_summary TEXT",
+            "recurrence_evaluated_at": "ALTER TABLE items ADD COLUMN recurrence_evaluated_at TEXT",
+            "closed_at": "ALTER TABLE items ADD COLUMN closed_at TEXT",
+        }
+        with self.conn:
+            for name, sql in additions.items():
+                if name not in columns:
+                    self.conn.execute(sql)
 
     @staticmethod
     def _item(row: sqlite3.Row) -> Dict[str, Any]:
@@ -73,15 +99,24 @@ class Repository:
 
     def create_item(self, title: str, description: str, severity: str,
                     quantity: float, threshold: float, external_ref: Optional[str],
-                    actor: str) -> Dict[str, Any]:
+                    actor: str, workstation: Optional[str] = None,
+                    injury_cause: Optional[str] = None,
+                    recurrence: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         now = utc_now()
+        recurrence = recurrence or {}
         try:
             with self._lock, self.conn:
                 cur = self.conn.execute(
                     """INSERT INTO items(title, description, severity, quantity, threshold,
-                       status, version, external_ref, created_by, created_at, updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                    (title, description, severity, quantity, threshold, STATES[0], 1,
+                       workstation, injury_cause, status, version, recurrence_count,
+                       recurrence_of, recurrence_links, last_corrective_summary,
+                       recurrence_evaluated_at, external_ref, created_by, created_at, updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (title, description, severity, quantity, threshold, workstation,
+                     injury_cause, STATES[0], 1, int(recurrence.get("count", 0)),
+                     recurrence.get("of"),
+                     json.dumps(recurrence.get("links", []), ensure_ascii=False),
+                     recurrence.get("summary"), recurrence.get("evaluated_at"),
                      external_ref, actor, now, now),
                 )
                 item_id = int(cur.lastrowid)
@@ -110,11 +145,42 @@ class Repository:
     def transition_item(self, item_id: int, target: str, expected_version: int,
                         actor: str) -> Dict[str, Any]:
         now = utc_now()
+        closed_at = now if target == STATES[-1] else None
+        with self._lock, self.conn:
+            if closed_at is not None:
+                cur = self.conn.execute(
+                    """UPDATE items SET status=?, version=version+1, updated_at=?, closed_at=?
+                       WHERE id=? AND version=?""",
+                    (target, now, closed_at, item_id, expected_version),
+                )
+            else:
+                cur = self.conn.execute(
+                    """UPDATE items SET status=?, version=version+1, updated_at=?
+                       WHERE id=? AND version=?""",
+                    (target, now, item_id, expected_version),
+                )
+            if cur.rowcount == 0:
+                exists = self.conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone()
+                if exists is None:
+                    raise NotFoundError("项目不存在")
+                raise ConflictError("版本冲突，请刷新后重试")
+        return self.get_item(item_id)
+
+    def update_link(self, item_id: int, workstation: Optional[str],
+                    injury_cause: Optional[str], recurrence: Dict[str, Any],
+                    expected_version: int, actor: str) -> Dict[str, Any]:
+        now = utc_now()
         with self._lock, self.conn:
             cur = self.conn.execute(
-                """UPDATE items SET status=?, version=version+1, updated_at=?
+                """UPDATE items SET workstation=?, injury_cause=?, recurrence_count=?,
+                   recurrence_of=?, recurrence_links=?, last_corrective_summary=?,
+                   recurrence_evaluated_at=?, version=version+1, updated_at=?
                    WHERE id=? AND version=?""",
-                (target, now, item_id, expected_version),
+                (workstation, injury_cause, int(recurrence.get("count", 0)),
+                 recurrence.get("of"),
+                 json.dumps(recurrence.get("links", []), ensure_ascii=False),
+                 recurrence.get("summary"), recurrence.get("evaluated_at"),
+                 now, item_id, expected_version),
             )
             if cur.rowcount == 0:
                 exists = self.conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone()
@@ -122,6 +188,17 @@ class Repository:
                     raise NotFoundError("项目不存在")
                 raise ConflictError("版本冲突，请刷新后重试")
         return self.get_item(item_id)
+
+    def find_recurrences(self, workstation: str, injury_cause: str,
+                         window_start: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT * FROM items WHERE workstation=? AND injury_cause=? AND status=?
+                   AND COALESCE(closed_at, updated_at)>=?
+                   ORDER BY COALESCE(closed_at, updated_at) DESC, id DESC""",
+                (workstation, injury_cause, STATES[-1], window_start),
+            ).fetchall()
+        return [self._item(row) for row in rows]
 
     def add_record(self, item_id: int, kind: str, detail: str, status: str,
                    external_ref: Optional[str], actor: str) -> Dict[str, Any]:

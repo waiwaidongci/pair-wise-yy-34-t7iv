@@ -2,18 +2,25 @@ from __future__ import annotations
 from .domain import ConflictError, ValidationError
 TITLE='工伤事故调查与纠正措施'; ENTITY='事故'; ID_PREFIX='OI'
 SEVERITIES=['minor', 'moderate', 'serious', 'fatal']; STATES=['reported', 'investigating', 'corrective_action', 'verification', 'closed']; TRANSITIONS={'reported': ['investigating'], 'investigating': ['corrective_action'], 'corrective_action': ['verification'], 'verification': ['closed'], 'closed': []}; TRANSITION_ROLES={'investigating': ['investigator'], 'corrective_action': ['investigator'], 'verification': ['safety_manager'], 'closed': ['safety_manager']}
-CREATE_ROLES=set(['reporter', 'investigator']); RECORD_ROLES=set(['investigator', 'safety_manager']); AUDIT_ROLES=set(['safety_manager', 'viewer']); VIEW_ROLES=set(['reporter', 'investigator', 'safety_manager', 'viewer'])
+CREATE_ROLES=set(['reporter', 'investigator']); RECORD_ROLES=set(['investigator', 'safety_manager']); AUDIT_ROLES=set(['safety_manager', 'viewer']); VIEW_ROLES=set(['reporter', 'investigator', 'safety_manager', 'viewer']); LINK_ROLES=set(['reporter', 'investigator'])
 SEVERITY_WEIGHT={'minor': 1.0, 'moderate': 3.0, 'serious': 6.0, 'fatal': 9.0}; DEADLINE_HOURS={'minor': 72, 'moderate': 24, 'serious': 8, 'fatal': 4}; TERMINAL_STATES=set(['closed'])
-def priority_score(severity,quantity=0.0,threshold=1.0,open_records=0):
+RECURRENCE_WINDOW_DAYS=180; CORRECTIVE_RECORD_KINDS=('corrective_action', 'corrective', 'action', 'measure'); LINK_FIELDS=(('workstation', '工位编号'), ('injury_cause', '伤害原因'))
+def recurrence_boost(recurrence_count): return min(3,max(0,2*int(recurrence_count or 0)))
+def priority_score(severity,quantity=0.0,threshold=1.0,open_records=0,recurrence_count=0):
     if severity not in SEVERITY_WEIGHT: raise ValidationError("unknown severity")
     ratio=quantity/threshold if threshold>0 else 1.0
-    return max(0,min(10,int(round(SEVERITY_WEIGHT[severity]+min(4.0,ratio*4.0)+min(3.0,float(open_records))))))
+    return max(0,min(10,int(round(SEVERITY_WEIGHT[severity]+min(4.0,ratio*4.0)+min(3.0,float(open_records))+recurrence_boost(recurrence_count)))))
 def response_deadline_hours(severity,quantity=0.0,threshold=1.0):
     if severity not in DEADLINE_HOURS: raise ValidationError("unknown severity")
     ratio=quantity/threshold if threshold>0 else 1.0
     return max(1,int(DEADLINE_HOURS[severity]/max(1.0,ratio)))
-def escalation_required(severity,quantity=0.0,threshold=1.0):
-    return severity==SEVERITIES[-1] or (threshold>0 and quantity>=threshold)
+def escalation_required(severity,quantity=0.0,threshold=1.0,recurrence_count=0):
+    return severity==SEVERITIES[-1] or (threshold>0 and quantity>=threshold) or int(recurrence_count or 0)>0
+def link_status(item): return 'linked' if item.get('workstation') and item.get('injury_cause') else 'pending'
+def investigation_blockers(item,target):
+    if target!=STATES[1]: return []
+    missing=[label for key,label in LINK_FIELDS if not item.get(key)]
+    return ['{}未补齐，事故待关联，不能进入调查'.format('、'.join(missing))] if missing else []
 def can_transition(current,target): return target in TRANSITIONS.get(current,[])
 def validate_transition(current,target):
     if current not in STATES or target not in STATES: raise ValidationError("未知状态")

@@ -29,10 +29,18 @@ python3 app.py --db ./data.db --port 8311
 - `POST /api/items`
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
+- `POST /api/items/{id}/link`，必须提交`expected_version`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
 - `GET /api/audit`
 
 允许角色：reporter, investigator, safety_manager, viewer。严重度越高、伤害指数越大或未关闭措施越多，优先级越高；严重事故必须在4小时内启动调查。
+
+## 复发链
+
+- 新事故可记录`workstation`（工位编号）与`injury_cause`（伤害原因）。任一缺失时`link_status=pending`（待关联），不能进入调查；通过`POST /api/items/{id}/link`补齐（仅报告阶段，reporter/investigator）后自动评估。
+- 评估查找近180天同工位同伤害原因的已结案事故，产出复发次数、上次纠正措施摘要（最近一次关联事故中kind为`corrective_action`等纠正类记录）与关联事故列表。
+- 每复发一次优先级+2（最多+3），且复发事故一律要求升级处理（`escalation_required=true`）。
+- 复发信息只写在新事故上，原事故的结论与记录照旧；列表与详情均展示`recurrence.basis`（复发依据）、`last_corrective_summary`（上次措施）与`linked_items`（关联事故）。
 
 ## 测试
 
